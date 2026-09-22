@@ -1,0 +1,12 @@
+[package]
+name = "rust-hex-vault"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aead = "0.5.2"
+aes-gcm = "0.10.3"
+rand = "0.8.5"
+clap = { version = "4.4", features = ["derive"] }
+anyhow = "1.0"
+base64 = "0.21.5"
