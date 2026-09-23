@@ -10,6 +10,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "hexvault")]
 #[command(about = "Encrypt and decrypt strings and files securely", long_about = None)]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 struct Cli {
     #[command(subcommand)]
     command:
@@ -64,7 +65,8 @@ fn main() -> Result<()> {
         Command::Decrypt { key, blob } => {
             let key_bytes = hash_key(key);
             let encrypted_bytes = general_purpose::STANDARD.decode(blob).context("Failed to decode base64 blob")?;
-            let decrypted = crypto::decrypt(&encrypted_bytes, &key_bytes)?;
+            let decrypted = crypto::decrypt(&encrypted_bytes, &key_bytes)
+                .map_err(|e| anyhow::anyhow!("Decryption failed: {}. Please check your key and blob.", e))?;
             println!("{}", String::from_utf8(decrypted).context("Decrypted data is not valid UTF-8")?);
         }
         Command::EncryptFile { key, input, output } => {
@@ -77,7 +79,8 @@ fn main() -> Result<()> {
         Command::DecryptFile { key, input, output } => {
             let key_bytes = hash_key(key);
             let data = read(input).context("Failed to read input file")?;
-            let decrypted = crypto::decrypt(&data, &key_bytes)?;
+            let decrypted = crypto::decrypt(&data, &key_bytes)
+                .map_err(|e| anyhow::anyhow!("Decryption failed: {}. Please check your key and the file.", e))?;
             write(output, decrypted).context("Failed to write output file")?;
             println!("File decrypted successfully.");
         }
