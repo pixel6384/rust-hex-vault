@@ -10,6 +10,7 @@ use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use pbkdf2::pbkdf2_hmac;
 use sha2::Sha256;
+use rand::{RngCore, rngs::OsRng};
 
 #[derive(Parser)]
 #[command(name = "hexvault")]
@@ -68,6 +69,8 @@ enum Command {
         #[command(subcommand)]
         action: VaultAction,
     },
+    /// Generate a random salt for key derivation
+    GenSalt,
 }
 
 #[derive(Subcommand)]
@@ -92,6 +95,12 @@ enum VaultAction {
         name: String,
         #[arg(short, long)]
         salt: Option<String>,
+    },
+    /// Remove a secret from the vault
+    Delete {
+        #[arg(short, long)]
+        vault_path: PathBuf,
+        name: String,
     },
     /// List all keys in the vault
     List {
@@ -156,6 +165,15 @@ fn main() -> Result<()> {
                     .map_err(|e| anyhow::anyhow!("Decryption failed: {}. Check your key.", e))?;
                 println!("{}", String::from_utf8(decrypted).context("Decrypted data is not valid UTF-8")?);
             }
+            VaultAction::Delete { vault_path, name } => {
+                let mut vault = load_vault(vault_path)?;
+                if vault.entries.remove(name).is_some() {
+                    save_vault(vault_path, &vault)?;
+                    println!("Secret '{}' removed from vault.", name);
+                } else {
+                    println!("Secret '{}' not found in vault.", name);
+                }
+            }
             VaultAction::List { vault_path } => {
                 let vault = load_vault(vault_path)?;
                 if vault.entries.is_empty() {
@@ -168,6 +186,11 @@ fn main() -> Result<()> {
                 }
             }
         },
+        Command::GenSalt => {
+            let mut salt = [0u8; 16];
+            OsRng.fill_bytes(&mut salt);
+            println!("{}", general_purpose::STANDARD.encode(salt));
+        }
     }
 
     Ok()
