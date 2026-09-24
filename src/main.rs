@@ -3,12 +3,13 @@ mod crypto;
 use clap::{Parser, Subcommand};
 use anyhow::{Result, Context};
 use base64::{engine::general_purpose, Engine as _};
-use sha2::{Sha256, Digest};
 use std::fs::{read, write, File};
 use std::io::{BufReader, BufWriter};
 use std::path::PathBuf;
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
+use pbkdf2::pbkdf2_hmac;
+use sha2::Sha256;
 
 #[derive(Parser)]
 #[command(name = "hexvault")]
@@ -97,26 +98,26 @@ fn main() -> Result<()> {
 
     match &cli.command {
         Command::Encrypt { key, text } => {
-            let key_bytes = hash_key(key);
+            let key_bytes = derive_key(key);
             let encrypted = crypto::encrypt(text.as_bytes(), &key_bytes)?;
             println!("{}", general_purpose::STANDARD.encode(encrypted));
         }
         Command::Decrypt { key, blob } => {
-            let key_bytes = hash_key(key);
+            let key_bytes = derive_key(key);
             let encrypted_bytes = general_purpose::STANDARD.decode(blob).context("Failed to decode base64 blob")?;
             let decrypted = crypto::decrypt(&encrypted_bytes, &key_bytes)
                 .map_err(|e| anyhow::anyhow!("Decryption failed: {}. Please check your key and blob.", e))?;
             println!("{}", String::from_utf8(decrypted).context("Decrypted data is not valid UTF-8")?);
         }
         Command::EncryptFile { key, input, output } => {
-            let key_bytes = hash_key(key);
+            let key_bytes = derive_key(key);
             let data = read(input).context("Failed to read input file")?;
             let encrypted = crypto::encrypt(&data, &key_bytes)?;
             write(output, encrypted).context("Failed to write output file")?;
             println!("File encrypted successfully.");
         }
         Command::DecryptFile { key, input, output } => {
-            let key_bytes = hash_key(key);
+            let key_bytes = derive_key(key);
             let data = read(input).context("Failed to read input file")?;
             let decrypted = crypto::decrypt(&data, &key_bytes)
                 .map_err(|e| anyhow::anyhow!("Decryption failed: {}. Please check your key and the file.", e))?;
@@ -125,7 +126,7 @@ fn main() -> Result<()> {
         }
         Command::Vault { action } => match action {
             VaultAction::Set { key, vault_path, name, value } => {
-                let key_bytes = hash_key(key);
+                let key_bytes = derive_key(key);
                 let encrypted = crypto::encrypt(value.as_bytes(), &key_bytes)?;
                 let blob = general_purpose::STANDARD.encode(encrypted);
 
@@ -135,7 +136,7 @@ fn main() -> Result<()> {
                 println!("Secret '{}' stored in vault.", name);
             }
             VaultAction::Get { key, vault_path, name } => {
-                let key_bytes = hash_key(key);
+                let key_bytes = derive_key(key);
                 let vault = load_vault(vault_path)?;
                 let blob = vault.entries.get(name).context(format!("Secret '{}' not found in vault", name))?;
                 let encrypted_bytes = general_purpose::STANDARD.decode(blob).context("Failed to decode base64 blob")?;
@@ -160,10 +161,13 @@ fn main() -> Result<()> {
     Ok()
 }
 
-fn hash_key(key: &str) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(key.as_bytes());
-    hasher.finalize().into()
+fn derive_key(password: &str) -> [u8; 32] {
+    let mut key = [0u8; 32];
+    // Using a fixed salt for simplicity in this CLI implementation to maintain compatibility 
+    // with the existing non-salted API, though a per-file/per-blob salt is preferred in production.
+    let salt = b"rust-hex-vault-static-salt";
+    pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, 100_000, &mut key);
+    key
 }
 
 fn load_vault(path: &PathBuf) -> Result<Vault> {
