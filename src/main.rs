@@ -206,14 +206,14 @@ fn main() -> Result<()> {
 
 fn derive_key(password: &str, salt: Option<&str>) -> [u8; 32] {
     let mut key = [0u8; 32];
-    let salt_bytes = match salt {
-        Some(s) => {
-            let decoded = general_purpose::STANDARD.decode(s).unwrap_or_else(|_| s.as_bytes().to_vec());
-            Box::leak(decoded.into_boxed_slice())
-        },
-        None => b"rust-hex-vault-static-salt",
-    };
-    pbkdf2_hmac::<Sha256>(password.as_bytes(), salt_bytes, 100_000, &mut key);
+    
+    if let Some(s) = salt {
+        let salt_bytes = general_purpose::STANDARD.decode(s).unwrap_or_else(|_| s.as_bytes().to_vec());
+        pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt_bytes, 100_000, &mut key);
+    } else {
+        pbkdf2_hmac::<Sha256>(password.as_bytes(), b"rust-hex-vault-static-salt", 100_000, &mut key);
+    }
+    
     key
 }
 
