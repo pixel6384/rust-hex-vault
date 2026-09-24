@@ -83,8 +83,6 @@ enum VaultAction {
         vault_path: PathBuf,
         name: String,
         value: String,
-        #[arg(short, long)]
-        salt: Option<String>,
     },
     /// Retrieve a secret from the vault
     Get {
@@ -93,8 +91,6 @@ enum VaultAction {
         #[arg(short, long)]
         vault_path: PathBuf,
         name: String,
-        #[arg(short, long)]
-        salt: Option<String>,
     },
     /// Remove a secret from the vault
     Delete {
@@ -111,6 +107,7 @@ enum VaultAction {
 
 #[derive(Serialize, Deserialize, Default)]
 struct Vault {
+    salt: Option<String>,
     entries: HashMap<String, String>,
 }
 
@@ -146,19 +143,30 @@ fn main() -> Result<()> {
             println!("File decrypted successfully.");
         }
         Command::Vault { action } => match action {
-            VaultAction::Set { key, vault_path, name, value, salt } => {
-                let key_bytes = derive_key(key, salt.as_deref());
+            VaultAction::Set { key, vault_path, name, value } => {
+                let mut vault = load_vault(vault_path)?;
+                
+                let salt = vault.salt.clone().unwrap_or_else(|| {
+                    let mut s = [0u8; 16];
+                    OsRng.fill_bytes(&mut s);
+                    let encoded = general_purpose::STANDARD.encode(s);
+                    vault.salt = Some(encoded.clone());
+                    encoded
+                });
+
+                let key_bytes = derive_key(key, Some(&salt));
                 let encrypted = crypto::encrypt(value.as_bytes(), &key_bytes)?;
                 let blob = general_purpose::STANDARD.encode(encrypted);
 
-                let mut vault = load_vault(vault_path)?;
                 vault.entries.insert(name.clone(), blob);
                 save_vault(vault_path, &vault)?;
                 println!("Secret '{}' stored in vault.", name);
             }
-            VaultAction::Get { key, vault_path, name, salt } => {
-                let key_bytes = derive_key(key, salt.as_deref());
+            VaultAction::Get { key, vault_path, name } => {
                 let vault = load_vault(vault_path)?;
+                let salt = vault.salt.as_deref().context("Vault salt not found")?;
+                
+                let key_bytes = derive_key(key, Some(salt));
                 let blob = vault.entries.get(name).context(format!("Secret '{}' not found in vault", name))?;
                 let encrypted_bytes = general_purpose::STANDARD.decode(blob).context("Failed to decode base64 blob")?;
                 let decrypted = crypto::decrypt(&encrypted_bytes, &key_bytes)
@@ -199,7 +207,10 @@ fn main() -> Result<()> {
 fn derive_key(password: &str, salt: Option<&str>) -> [u8; 32] {
     let mut key = [0u8; 32];
     let salt_bytes = match salt {
-        Some(s) => s.as_bytes(),
+        Some(s) => {
+            let decoded = general_purpose::STANDARD.decode(s).unwrap_or_else(|_| s.as_bytes().to_vec());
+            Box::leak(decoded.into_boxed_slice())
+        },
         None => b"rust-hex-vault-static-salt",
     };
     pbkdf2_hmac::<Sha256>(password.as_bytes(), salt_bytes, 100_000, &mut key);
