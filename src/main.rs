@@ -103,6 +103,16 @@ enum VaultAction {
         #[arg(short, long)]
         vault_path: PathBuf,
     },
+    /// Completely wipe the vault file
+    Wipe {
+        #[arg(short, long)]
+        vault_path: PathBuf,
+    },
+    /// Show vault metadata
+    Info {
+        #[arg(short, long)]
+        vault_path: PathBuf,
+    },
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -198,6 +208,20 @@ fn main() -> Result<()> {
                         println!(" - {}", name);
                     }
                 }
+            }
+            VaultAction::Wipe { vault_path } => {
+                if vault_path.exists() {
+                    std::fs::remove_file(vault_path).context("Failed to delete vault file")?;
+                    println!("Vault at {:?} has been wiped.", vault_path);
+                } else {
+                    println!("Vault file does not exist.");
+                }
+            }
+            VaultAction::Info { vault_path } => {
+                let vault = load_vault(vault_path)?;
+                println!("Vault Path: {:?}", vault_path);
+                println!("Entries: {}", vault.entries.len());
+                println!("Salt Present: {}", vault.salt.is_some());
             }
         },
         Command::GenSalt => {
