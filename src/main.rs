@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use anyhow::{Result, Context};
 use base64::{engine::general_purpose, Engine as _};
 use std::fs::{read, write, File};
-use std::io::{BufReader, BufWriter};
+use std::io::{self, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
@@ -27,7 +27,7 @@ enum Command {
     /// Encrypt a string
     Encrypt {
         #[arg(short, long)]
-        key: String,
+        key: Option<String>,
         #[arg(short, long)]
         text: String,
         #[arg(short, long)]
@@ -36,7 +36,7 @@ enum Command {
     /// Decrypt a string
     Decrypt {
         #[arg(short, long)]
-        key: String,
+        key: Option<String>,
         #[arg(short, long)]
         blob: String,
         #[arg(short, long)]
@@ -45,7 +45,7 @@ enum Command {
     /// Encrypt a file
     EncryptFile {
         #[arg(short, long)]
-        key: String,
+        key: Option<String>,
         #[arg(short, long)]
         input: PathBuf,
         #[arg(short, long)]
@@ -56,7 +56,7 @@ enum Command {
     /// Decrypt a file
     DecryptFile {
         #[arg(short, long)]
-        key: String,
+        key: Option<String>,
         #[arg(short, long)]
         input: PathBuf,
         #[arg(short, long)]
@@ -78,7 +78,7 @@ enum VaultAction {
     /// Add or update a secret in the vault
     Set {
         #[arg(short, long)]
-        key: String,
+        key: Option<String>,
         #[arg(short, long)]
         vault_path: PathBuf,
         name: String,
@@ -87,7 +87,7 @@ enum VaultAction {
     /// Retrieve a secret from the vault
     Get {
         #[arg(short, long)]
-        key: String,
+        key: Option<String>,
         #[arg(short, long)]
         vault_path: PathBuf,
         name: String,
@@ -116,26 +116,30 @@ fn main() -> Result<()> {
 
     match &cli.command {
         Command::Encrypt { key, text, salt } => {
-            let key_bytes = derive_key(key, salt.as_deref());
+            let key_val = resolve_key(key)?;
+            let key_bytes = derive_key(&key_val, salt.as_deref());
             let encrypted = crypto::encrypt(text.as_bytes(), &key_bytes)?;
             println!("{}", general_purpose::STANDARD.encode(encrypted));
         }
         Command::Decrypt { key, blob, salt } => {
-            let key_bytes = derive_key(key, salt.as_deref());
+            let key_val = resolve_key(key)?;
+            let key_bytes = derive_key(&key_val, salt.as_deref());
             let encrypted_bytes = general_purpose::STANDARD.decode(blob).context("Failed to decode base64 blob")?;
             let decrypted = crypto::decrypt(&encrypted_bytes, &key_bytes)
                 .map_err(|e| anyhow::anyhow!("Decryption failed: {}. Please check your key and blob.", e))?;
             println!("{}", String::from_utf8(decrypted).context("Decrypted data is not valid UTF-8")?);
         }
         Command::EncryptFile { key, input, output, salt } => {
-            let key_bytes = derive_key(key, salt.as_deref());
+            let key_val = resolve_key(key)?;
+            let key_bytes = derive_key(&key_val, salt.as_deref());
             let data = read(input).context("Failed to read input file")?;
             let encrypted = crypto::encrypt(&data, &key_bytes)?;
             write(output, encrypted).context("Failed to write output file")?;
             println!("File encrypted successfully.");
         }
         Command::DecryptFile { key, input, output, salt } => {
-            let key_bytes = derive_key(key, salt.as_deref());
+            let key_val = resolve_key(key)?;
+            let key_bytes = derive_key(&key_val, salt.as_deref());
             let data = read(input).context("Failed to read input file")?;
             let decrypted = crypto::decrypt(&data, &key_bytes)
                 .map_err(|e| anyhow::anyhow!("Decryption failed: {}. Please check your key and the file.", e))?;
@@ -144,6 +148,7 @@ fn main() -> Result<()> {
         }
         Command::Vault { action } => match action {
             VaultAction::Set { key, vault_path, name, value } => {
+                let key_val = resolve_key(key)?;
                 let mut vault = load_vault(vault_path)?;
                 
                 let salt = vault.salt.clone().unwrap_or_else(|| {
@@ -154,7 +159,7 @@ fn main() -> Result<()> {
                     encoded
                 });
 
-                let key_bytes = derive_key(key, Some(&salt));
+                let key_bytes = derive_key(&key_val, Some(&salt));
                 let encrypted = crypto::encrypt(value.as_bytes(), &key_bytes)?;
                 let blob = general_purpose::STANDARD.encode(encrypted);
 
@@ -163,10 +168,11 @@ fn main() -> Result<()> {
                 println!("Secret '{}' stored in vault.", name);
             }
             VaultAction::Get { key, vault_path, name } => {
+                let key_val = resolve_key(key)?;
                 let vault = load_vault(vault_path)?;
                 let salt = vault.salt.as_deref().context("Vault salt not found")?;
                 
-                let key_bytes = derive_key(key, Some(salt));
+                let key_bytes = derive_key(&key_val, Some(salt));
                 let blob = vault.entries.get(name).context(format!("Secret '{}' not found in vault", name))?;
                 let encrypted_bytes = general_purpose::STANDARD.decode(blob).context("Failed to decode base64 blob")?;
                 let decrypted = crypto::decrypt(&encrypted_bytes, &key_bytes)
@@ -204,14 +210,38 @@ fn main() -> Result<()> {
     Ok()
 }
 
+fn resolve_key(key_arg: &Option<String>) -> Result<String> {
+    if let Some(k) = key_arg {
+        return Ok(k.clone());
+    }
+    
+    if let Ok(k) = std::env::var("HEXVAULT_KEY") {
+        return Ok(k);
+    }
+
+    print!("Enter password: ");
+    io::stdout().flush()?;
+    
+    let mut password = String::new();
+    io::stdin().read_line(&mut password).context("Failed to read password from stdin")?;
+    let password = password.trim().to_string();
+    
+    if password.is_empty() {
+        return Err(anyhow::anyhow!("Password cannot be empty"));
+    }
+    
+    Ok(password)
+}
+
 fn derive_key(password: &str, salt: Option<&str>) -> [u8; 32] {
     let mut key = [0u8; 32];
+    const ITERATIONS: u32 = 600_000;
     
     if let Some(s) = salt {
         let salt_bytes = general_purpose::STANDARD.decode(s).unwrap_or_else(|_| s.as_bytes().to_vec());
-        pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt_bytes, 100_000, &mut key);
+        pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt_bytes, ITERATIONS, &mut key);
     } else {
-        pbkdf2_hmac::<Sha256>(password.as_bytes(), b"rust-hex-vault-static-salt", 100_000, &mut key);
+        pbkdf2_hmac::<Sha256>(password.as_bytes(), b"rust-hex-vault-static-salt", ITERATIONS, &mut key);
     }
     
     key
