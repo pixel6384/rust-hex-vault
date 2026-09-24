@@ -222,8 +222,7 @@ fn resolve_key(key_arg: &Option<String>) -> Result<String> {
     print!("Enter password: ");
     io::stdout().flush()?;
     
-    let mut password = String::new();
-    io::stdin().read_line(&mut password).context("Failed to read password from stdin")?;
+    let password = rpassword::read_password().context("Failed to read password from stdin")?;
     let password = password.trim().to_string();
     
     if password.is_empty() {
