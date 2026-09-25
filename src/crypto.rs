@@ -4,6 +4,16 @@ use aes_gcm::{
 };
 use anyhow::{anyhow, Result};
 use rand::RngCore;
+use pbkdf2::pbkdf2_hmac;
+use sha2::Sha256;
+
+/// Derives a 32-byte key from a password and salt using PBKDF2-HMAC-SHA256.
+pub fn derive_key(password: &str, salt: &[u8]) -> [u8; 32] {
+    let mut key = [0u8; 32];
+    const ITERATIONS: u32 = 600_000;
+    pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, ITERATIONS, &mut key);
+    key
+}
 
 pub fn encrypt(data: &[u8], key: &[u8]) -> Result<Vec<u8>> {
     let cipher = Aes256Gcm::new_from_slice(key)

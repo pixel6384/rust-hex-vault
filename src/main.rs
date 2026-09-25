@@ -3,13 +3,11 @@ mod crypto;
 use clap::{Parser, Subcommand};
 use anyhow::{Result, Context};
 use base64::{engine::general_purpose, Engine as _};
-use std::fs::{read, write, File};
-use std::io::{self, BufReader, BufWriter, Write};
+use std::fs::{read, write};
+use std::io::{self, Write};
 use std::path::PathBuf;
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
-use pbkdf2::pbkdf2_hmac;
-use sha2::Sha256;
 use rand::{RngCore, rngs::OsRng};
 
 #[derive(Parser)]
@@ -130,13 +128,15 @@ fn main() -> Result<()> {
     match &cli.command {
         Command::Encrypt { key, text, salt } => {
             let key_val = resolve_key(key)?;
-            let key_bytes = derive_key(&key_val, salt.as_deref());
+            let salt_bytes = resolve_salt(salt);
+            let key_bytes = crypto::derive_key(&key_val, &salt_bytes);
             let encrypted = crypto::encrypt(text.as_bytes(), &key_bytes)?;
             println!("{}", general_purpose::STANDARD.encode(encrypted));
         }
         Command::Decrypt { key, blob, salt } => {
             let key_val = resolve_key(key)?;
-            let key_bytes = derive_key(&key_val, salt.as_deref());
+            let salt_bytes = resolve_salt(salt);
+            let key_bytes = crypto::derive_key(&key_val, &salt_bytes);
             let encrypted_bytes = general_purpose::STANDARD.decode(blob).context("Failed to decode base64 blob")?;
             let decrypted = crypto::decrypt(&encrypted_bytes, &key_bytes)
                 .map_err(|e| anyhow::anyhow!("Decryption failed: {}. Please check your key and blob.", e))?;
@@ -144,7 +144,8 @@ fn main() -> Result<()> {
         }
         Command::EncryptFile { key, input, output, salt } => {
             let key_val = resolve_key(key)?;
-            let key_bytes = derive_key(&key_val, salt.as_deref());
+            let salt_bytes = resolve_salt(salt);
+            let key_bytes = crypto::derive_key(&key_val, &salt_bytes);
             let data = read(input).context("Failed to read input file")?;
             let encrypted = crypto::encrypt(&data, &key_bytes)?;
             write(output, encrypted).context("Failed to write output file")?;
@@ -152,7 +153,8 @@ fn main() -> Result<()> {
         }
         Command::DecryptFile { key, input, output, salt } => {
             let key_val = resolve_key(key)?;
-            let key_bytes = derive_key(&key_val, salt.as_deref());
+            let salt_bytes = resolve_salt(salt);
+            let key_bytes = crypto::derive_key(&key_val, &salt_bytes);
             let data = read(input).context("Failed to read input file")?;
             let decrypted = crypto::decrypt(&data, &key_bytes)
                 .map_err(|e| anyhow::anyhow!("Decryption failed: {}. Please check your key and the file.", e))?;
@@ -246,18 +248,12 @@ fn resolve_key(key_arg: &Option<String>) -> Result<String> {
     Ok(password)
 }
 
-fn derive_key(password: &str, salt: Option<&str>) -> [u8; 32] {
-    let mut key = [0u8; 32];
-    const ITERATIONS: u32 = 600_000;
-    
-    if let Some(s) = salt {
-        let salt_bytes = general_purpose::STANDARD.decode(s).unwrap_or_else(|_| s.as_bytes().to_vec());
-        pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt_bytes, ITERATIONS, &mut key);
+fn resolve_salt(salt_arg: &Option<String>) -> Vec<u8> {
+    if let Some(s) = salt_arg {
+        general_purpose::STANDARD.decode(s).unwrap_or_else(|_| s.as_bytes().to_vec())
     } else {
-        pbkdf2_hmac::<Sha256>(password.as_bytes(), b"rust-hex-vault-static-salt", ITERATIONS, &mut key);
+        b"rust-hex-vault-static-salt".to_vec()
     }
-    
-    key
 }
 
 fn load_vault(path: &PathBuf, password: &str) -> Result<Vault> {
@@ -271,8 +267,7 @@ fn load_vault(path: &PathBuf, password: &str) -> Result<Vault> {
     }
 
     let (salt, encrypted_data) = data.split_at(16);
-    let salt_str = general_purpose::STANDARD.encode(salt);
-    let key_bytes = derive_key(password, Some(&salt_str));
+    let key_bytes = crypto::derive_key(password, salt);
     
     let decrypted_data = crypto::decrypt(encrypted_data, &key_bytes)
         .map_err(|e| anyhow::anyhow!("Vault decryption failed: {}. Incorrect password?", e))?;
@@ -286,8 +281,7 @@ fn save_vault(path: &PathBuf, vault: &Vault, password: &str) -> Result<()> {
     let mut salt = [0u8; 16];
     OsRng.fill_bytes(&mut salt);
     
-    let salt_str = general_purpose::STANDARD.encode(salt);
-    let key_bytes = derive_key(password, Some(&salt_str));
+    let key_bytes = crypto::derive_key(password, &salt);
     
     let encrypted_data = crypto::encrypt(&json_data, &key_bytes).context("Failed to encrypt vault")?;
     
