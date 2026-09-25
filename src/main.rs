@@ -265,10 +265,16 @@ fn load_vault(path: &PathBuf, password: &str) -> Result<Vault> {
         return Ok(Vault::default());
     }
     
-    let encrypted_data = read(path).context("Failed to read vault file")?;
-    let key_bytes = derive_key(password, None); // Using static salt for vault structure
+    let data = read(path).context("Failed to read vault file")?;
+    if data.len() < 16 {
+        return Err(anyhow::anyhow!("Vault file is corrupted or too short"));
+    }
+
+    let (salt, encrypted_data) = data.split_at(16);
+    let salt_str = general_purpose::STANDARD.encode(salt);
+    let key_bytes = derive_key(password, Some(&salt_str));
     
-    let decrypted_data = crypto::decrypt(&encrypted_data, &key_bytes)
+    let decrypted_data = crypto::decrypt(encrypted_data, &key_bytes)
         .map_err(|e| anyhow::anyhow!("Vault decryption failed: {}. Incorrect password?", e))?;
 
     serde_json::from_slice(&decrypted_data).context("Failed to parse vault JSON")
@@ -276,8 +282,17 @@ fn load_vault(path: &PathBuf, password: &str) -> Result<Vault> {
 
 fn save_vault(path: &PathBuf, vault: &Vault, password: &str) -> Result<()> {
     let json_data = serde_json::to_vec_pretty(vault).context("Failed to serialize vault JSON")?;
-    let key_bytes = derive_key(password, None);
+    
+    let mut salt = [0u8; 16];
+    OsRng.fill_bytes(&mut salt);
+    
+    let salt_str = general_purpose::STANDARD.encode(salt);
+    let key_bytes = derive_key(password, Some(&salt_str));
     
     let encrypted_data = crypto::encrypt(&json_data, &key_bytes).context("Failed to encrypt vault")?;
-    write(path, encrypted_data).context("Failed to write vault file")
+    
+    let mut final_data = salt.to_vec();
+    final_data.extend(encrypted_data);
+    
+    write(path, final_data).context("Failed to write vault file")
 }
