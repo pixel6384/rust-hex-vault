@@ -95,11 +95,15 @@ enum VaultAction {
     /// Remove a secret from the vault
     Delete {
         #[arg(short, long)]
+        key: Option<String>,
+        #[arg(short, long)]
         vault_path: PathBuf,
         name: String,
     },
     /// List all keys in the vault
     List {
+        #[arg(short, long)]
+        key: Option<String>,
         #[arg(short, long)]
         vault_path: PathBuf,
     },
@@ -117,7 +121,6 @@ enum VaultAction {
 
 #[derive(Serialize, Deserialize, Default)]
 struct Vault {
-    salt: Option<String>,
     entries: HashMap<String, String>,
 }
 
@@ -159,47 +162,31 @@ fn main() -> Result<()> {
         Command::Vault { action } => match action {
             VaultAction::Set { key, vault_path, name, value } => {
                 let key_val = resolve_key(key)?;
-                let mut vault = load_vault(vault_path)?;
+                let mut vault = load_vault(vault_path, &key_val)?;
                 
-                let salt = vault.salt.clone().unwrap_or_else(|| {
-                    let mut s = [0u8; 16];
-                    OsRng.fill_bytes(&mut s);
-                    let encoded = general_purpose::STANDARD.encode(s);
-                    vault.salt = Some(encoded.clone());
-                    encoded
-                });
-
-                let key_bytes = derive_key(&key_val, Some(&salt));
-                let encrypted = crypto::encrypt(value.as_bytes(), &key_bytes)?;
-                let blob = general_purpose::STANDARD.encode(encrypted);
-
-                vault.entries.insert(name.clone(), blob);
-                save_vault(vault_path, &vault)?;
+                vault.entries.insert(name.clone(), value.clone());
+                save_vault(vault_path, &vault, &key_val)?;
                 println!("Secret '{}' stored in vault.", name);
             }
             VaultAction::Get { key, vault_path, name } => {
                 let key_val = resolve_key(key)?;
-                let vault = load_vault(vault_path)?;
-                let salt = vault.salt.as_deref().context("Vault salt not found")?;
-                
-                let key_bytes = derive_key(&key_val, Some(salt));
-                let blob = vault.entries.get(name).context(format!("Secret '{}' not found in vault", name))?;
-                let encrypted_bytes = general_purpose::STANDARD.decode(blob).context("Failed to decode base64 blob")?;
-                let decrypted = crypto::decrypt(&encrypted_bytes, &key_bytes)
-                    .map_err(|e| anyhow::anyhow!("Decryption failed: {}. Check your key.", e))?;
-                println!("{}", String::from_utf8(decrypted).context("Decrypted data is not valid UTF-8")?);
+                let vault = load_vault(vault_path, &key_val)?;
+                let value = vault.entries.get(name).context(format!("Secret '{}' not found in vault", name))?;
+                println!("{}", value);
             }
-            VaultAction::Delete { vault_path, name } => {
-                let mut vault = load_vault(vault_path)?;
+            VaultAction::Delete { key, vault_path, name } => {
+                let key_val = resolve_key(key)?;
+                let mut vault = load_vault(vault_path, &key_val)?;
                 if vault.entries.remove(name).is_some() {
-                    save_vault(vault_path, &vault)?;
+                    save_vault(vault_path, &vault, &key_val)?;
                     println!("Secret '{}' removed from vault.", name);
                 } else {
                     println!("Secret '{}' not found in vault.", name);
                 }
             }
-            VaultAction::List { vault_path } => {
-                let vault = load_vault(vault_path)?;
+            VaultAction::List { key, vault_path } => {
+                let key_val = resolve_key(key)?;
+                let vault = load_vault(vault_path, &key_val)?;
                 if vault.entries.is_empty() {
                     println!("Vault is empty.");
                 } else {
@@ -218,10 +205,13 @@ fn main() -> Result<()> {
                 }
             }
             VaultAction::Info { vault_path } => {
-                let vault = load_vault(vault_path)?;
-                println!("Vault Path: {:?}", vault_path);
-                println!("Entries: {}", vault.entries.len());
-                println!("Salt Present: {}", vault.salt.is_some());
+                if vault_path.exists() {
+                    let data = read(vault_path).context("Failed to read vault file")?;
+                    println!("Vault Path: {:?}", vault_path);
+                    println!("Encrypted Size: {} bytes", data.len());
+                } else {
+                    println!("Vault file does not exist.");
+                }
             }
         },
         Command::GenSalt => {
@@ -270,17 +260,24 @@ fn derive_key(password: &str, salt: Option<&str>) -> [u8; 32] {
     key
 }
 
-fn load_vault(path: &PathBuf) -> Result<Vault> {
+fn load_vault(path: &PathBuf, password: &str) -> Result<Vault> {
     if !path.exists() {
         return Ok(Vault::default());
     }
-    let file = File::open(path).context("Failed to open vault file")?;
-    let reader = BufReader::new(file);
-    serde_json::from_reader(reader).context("Failed to parse vault JSON")
+    
+    let encrypted_data = read(path).context("Failed to read vault file")?;
+    let key_bytes = derive_key(password, None); // Using static salt for vault structure
+    
+    let decrypted_data = crypto::decrypt(&encrypted_data, &key_bytes)
+        .map_err(|e| anyhow::anyhow!("Vault decryption failed: {}. Incorrect password?", e))?;
+
+    serde_json::from_slice(&decrypted_data).context("Failed to parse vault JSON")
 }
 
-fn save_vault(path: &PathBuf, vault: &Vault) -> Result<()> {
-    let file = File::create(path).context("Failed to create vault file")?;
-    let writer = BufWriter::new(file);
-    serde_json::to_writer_pretty(writer, vault).context("Failed to write vault JSON")
+fn save_vault(path: &PathBuf, vault: &Vault, password: &str) -> Result<()> {
+    let json_data = serde_json::to_vec_pretty(vault).context("Failed to serialize vault JSON")?;
+    let key_bytes = derive_key(password, None);
+    
+    let encrypted_data = crypto::encrypt(&json_data, &key_bytes).context("Failed to encrypt vault")?;
+    write(path, encrypted_data).context("Failed to write vault file")
 }
