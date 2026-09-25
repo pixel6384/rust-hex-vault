@@ -119,6 +119,7 @@ enum VaultAction {
 
 #[derive(Serialize, Deserialize, Default)]
 struct Vault {
+    version: u32,
     entries: HashMap<String, String>,
 }
 
@@ -272,11 +273,23 @@ fn load_vault(path: &PathBuf, password: &str) -> Result<Vault> {
     let decrypted_data = crypto::decrypt(encrypted_data, &key_bytes)
         .map_err(|e| anyhow::anyhow!("Vault decryption failed: {}. Incorrect password?", e))?;
 
-    serde_json::from_slice(&decrypted_data).context("Failed to parse vault JSON")
+    let mut vault: Vault = serde_json::from_slice(&decrypted_data).context("Failed to parse vault JSON")?;
+    
+    // Migration for old vaults without version
+    if vault.version == 0 {
+        vault.version = 1;
+    }
+
+    Ok(vault)
 }
 
 fn save_vault(path: &PathBuf, vault: &Vault, password: &str) -> Result<()> {
-    let json_data = serde_json::to_vec_pretty(vault).context("Failed to serialize vault JSON")?;
+    let mut vault_to_save = Vault {
+        version: 1,
+        entries: vault.entries.clone(),
+    };
+    
+    let json_data = serde_json::to_vec_pretty(&vault_to_save).context("Failed to serialize vault JSON")?;
     
     let mut salt = [0u8; 16];
     OsRng.fill_bytes(&mut salt);
