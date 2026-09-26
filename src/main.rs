@@ -165,23 +165,23 @@ fn main() -> Result<()> {
         Command::Vault { action } => match action {
             VaultAction::Set { key, vault_path, name, value } => {
                 let key_val = resolve_key(key)?;
-                let mut vault = load_vault(vault_path, &key_val)?;
+                let mut vault = load_vault(vault_path, &key_val).context("Failed to load vault for writing")?;
                 
                 vault.entries.insert(name.clone(), value.clone());
-                save_vault(vault_path, &vault, &key_val)?;
+                save_vault(vault_path, &vault, &key_val).context("Failed to save updated vault")?;
                 println!("Secret '{}' stored in vault.", name);
             }
             VaultAction::Get { key, vault_path, name } => {
                 let key_val = resolve_key(key)?;
-                let vault = load_vault(vault_path, &key_val)?;
+                let vault = load_vault(vault_path, &key_val).context("Failed to load vault")?;
                 let value = vault.entries.get(name).context(format!("Secret '{}' not found in vault", name))?;
                 println!("{}", value);
             }
             VaultAction::Delete { key, vault_path, name } => {
                 let key_val = resolve_key(key)?;
-                let mut vault = load_vault(vault_path, &key_val)?;
+                let mut vault = load_vault(vault_path, &key_val).context("Failed to load vault")?;
                 if vault.entries.remove(name).is_some() {
-                    save_vault(vault_path, &vault, &key_val)?;
+                    save_vault(vault_path, &vault, &key_val).context("Failed to save vault after deletion")?;
                     println!("Secret '{}' removed from vault.", name);
                 } else {
                     println!("Secret '{}' not found in vault.", name);
@@ -189,7 +189,7 @@ fn main() -> Result<()> {
             }
             VaultAction::List { key, vault_path } => {
                 let key_val = resolve_key(key)?;
-                let vault = load_vault(vault_path, &key_val)?;
+                let vault = load_vault(vault_path, &key_val).context("Failed to load vault")?;
                 if vault.entries.is_empty() {
                     println!("Vault is empty.");
                 } else {
@@ -228,25 +228,25 @@ fn main() -> Result<()> {
 }
 
 fn resolve_key(key_arg: &Option<String>) -> Result<String> {
-    if let Some(k) = key_arg {
-        return Ok(k.clone());
-    }
-    
-    if let Ok(k) = std::env::var("HEXVAULT_KEY") {
-        return Ok(k);
-    }
+    let raw_key = if let Some(k) = key_arg {
+        k.clone()
+    } else if let Ok(k) = std::env::var("HEXVAULT_KEY") {
+        k
+    } else {
+        print!("Enter password: ");
+        io::stdout().flush()?;
+        
+        let password = rpassword::read_password().context("Failed to read password from stdin")?;
+        password
+    };
 
-    print!("Enter password: ");
-    io::stdout().flush()?;
+    let trimmed_key = raw_key.trim().to_string();
     
-    let password = rpassword::read_password().context("Failed to read password from stdin")?;
-    let password = password.trim().to_string();
-    
-    if password.is_empty() {
+    if trimmed_key.is_empty() {
         return Err(anyhow::anyhow!("Password cannot be empty"));
     }
     
-    Ok(password)
+    Ok(trimmed_key)
 }
 
 fn resolve_salt(salt_arg: &Option<String>) -> Vec<u8> {
